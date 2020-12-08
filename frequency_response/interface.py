@@ -2,6 +2,7 @@
 #%%
 
 import serial
+import time
 
 READY_CMD = '1'
 CHECK_AVAILABLE_CMD = '2'
@@ -15,14 +16,11 @@ SET_KP_CMD = '9'
 SET_KD_CMD = 'A'
 SET_KI_CMD = 'B'
 SET_OFFSET_CMD = 'C'
+BEGIN_STABILIZE_CMD = 'D'
 ACK = 'a'
 NACK = 'n'
 
 class TRECS:
-    def pitch(self, degrees):
-        #(-0.3656 * analogRead(SENSOR_PIN)) + 185.64
-        val = (degrees-185.64)/(-.3656)
-        return val
     def flush(self):
         while self.ser.in_waiting:
             self.ser.read()
@@ -39,7 +37,7 @@ class TRECS:
         self.sendCmd(CHECK_AVAILABLE_CMD)
         return self.readResp() == ACK
     def setBase(self, base):
-        base = int(self.pitch(base))
+        base = int((base-185.64)/(-.3656))
         assert base == base&0xFFFF
         self.sendCmd(SET_BASE_CMD)
         assert self.readResp() == ACK
@@ -58,7 +56,7 @@ class TRECS:
         assert int(self.readResp()) == freq
         assert self.readResp() == ACK
     def setAmp(self, amp):
-        amp = int(self.pitch(amp))
+        amp = int(amp/.3656)
         assert amp == amp&0xFFFF
         self.sendCmd(SET_AMPLITUDE_CMD)
         assert self.readResp() == ACK
@@ -120,7 +118,7 @@ class TRECS:
             resp = self.readResp()
             if resp == ACK:
                 break
-            values.append(int(resp))
+            values.append(-0.3656 * int(resp) + 185.64)
         return values
     def begin(self):
         self.sendCmd(BEGIN_CMD)
@@ -131,8 +129,33 @@ class TRECS:
             resp = self.readResp()
             if resp == ACK:
                 break
-            values.append(int(resp))
+            values.append(-0.3656 * int(resp) + 185.64)
         return values
+    def beginStabilize(self, pitch, duration):
+        pitch = int((pitch-185.64) / (-.3656))
+        assert pitch&0xFFFF == pitch
+        self.sendCmd(BEGIN_STABILIZE_CMD)
+        assert self.readResp() == ACK
+        s = b''.join([((pitch&0xFF00)>>8).to_bytes(1, 'little'), (pitch&0xFF).to_bytes(1, 'little')])
+        print('Sending pitch: %d'%(pitch))
+        self.sendCmd(s)
+        assert int(self.readResp()) == pitch
+        assert self.readResp() == ACK
+        print('Starting stabilization')
+        pitches = []
+        t0 = time.time()
+        while time.time()-t0 < duration:
+            val = int(self.readResp())
+            pitches.append(-0.3656 * val + 185.64)
+        self.sendCmd(NACK)
+        while True:
+            val = self.readResp()
+            try:
+                _ = int(val)
+            except:
+                assert val == ACK
+                break
+        return pitches
     def __init__(self, port):
         self.ser = serial.Serial(port=port, baudrate=115200)
         resp = self.readResp()
@@ -147,37 +170,42 @@ class TRECS:
       
 import numpy as np
 from matplotlib import pyplot as plt
+import os
+import pickle
 
-offset = 70
-Kp = .05
+# 11.28 degrees is roughly vertical
+
+offset = 300
+Kp = 0
 Kd = 0
 Ki = 0
 
-base = 0
-frequency = 2 # Hz; Maximum frequency: 72
-amplitude = 1
-periods_measure = 4
-periods_wait = 8
+base = 11.28
+frequency = 10 # Hz; Maximum frequency: 72
+amplitude = 30
+periods_measure = 2
+periods_wait = 4
 
 try:
     trecs = TRECS('COM4')
     assert trecs.isAvailable()
     trecs.setOffset(offset)
+    trecs.setBase(base)
+    trecs.setFreq(frequency)
+    trecs.setAmp(amplitude)
+    trecs.setDuration(periods_measure, periods_wait)
     trecs.setKp(Kp)
     trecs.setKd(Kd)
     trecs.setKi(Ki)
-    trecs.setBase(base)
-    trecs.setAmp(amplitude)
-    trecs.setFreq(frequency)
-    trecs.setDuration(periods_measure, periods_wait)
-    input_values_p = trecs.computeLut()
-    input_values = []
-    for i in range(periods_measure):
-        input_values += input_values_p
-    output_values = trecs.begin()
-    assert len(output_values) == len(input_values)
-    plt.plot(range(len(input_values)), input_values, color='blue')
-    plt.figure()
-    plt.plot(range(len(output_values)), output_values, color='red')
+    input_pitches0 = trecs.computeLut()
+    output_pitches = trecs.begin()
 finally:
     del trecs
+    input_pitches = []
+    for i in range(periods_measure):
+        input_pitches += input_pitches0
+    (fig, ax) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
+    ax[0].plot(np.linspace(0, periods_measure/frequency, len(input_pitches)), input_pitches)
+    ax[1].plot(np.linspace(0, periods_measure/frequency, len(output_pitches)), output_pitches)
+    with open(os.getcwd()+'/data/%2.1fHz.pickle'%(frequency), 'wb') as F:
+        pickle.dump({'Input': input_pitches, 'Output': output_pitches}, F)

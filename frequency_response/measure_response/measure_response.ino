@@ -5,6 +5,8 @@
 #define ESC_PIN (6)
 #define DRIVE_PIN (10)
 #define SENSOR_PIN (A0)
+#define REFRESH_FREQUENCY (1000)
+#define UPDATE_FREQUENCY (25)
 
 #define READY_CMD ('1')
 #define CHECK_AVAILABLE_CMD ('2')
@@ -18,6 +20,7 @@
 #define SET_KD_CMD ('A')
 #define SET_KI_CMD ('B')
 #define SET_OFFSET_CMD ('C')
+#define BEGIN_STABILIZE_CMD ('D')
 #define ERROR_CMD ('e')
 #define ACK   ('a')
 #define NACK  ('n')
@@ -49,13 +52,16 @@ Servo ESC;
 
 void updatePid(void)
 {
+  setSpeed(offset+target);
+  /*static uint8_t nIntegrate = 0;
   static int16_t old_error = 0;
   static int16_t acc_error = 0;
   int16_t error = target-analogRead(SENSOR_PIN);
   acc_error += error;
-  int16_t new_drive = Kp(error) + Kd(error-old_error) + Ki(acc_error) + offset;
+  int16_t new_drive = Kp(error) + Kd(error-old_error) + Ki(acc_error)*(!nIntegrate) + offset;
   setSpeed(new_drive);
   old_error = error;
+  nIntegrate = (nIntegrate+1)%(REFRESH_FREQUENCY/10);*/
 }
 
 char readCmd(void)
@@ -83,8 +89,15 @@ void setup()
   setSpeed(0);
   digitalWrite(DRIVE_PIN, HIGH);
   delay(2500);
+  /*digitalWrite(DRIVE_PIN, LOW);   // Disconnect ESC from power
+  delay(500);                     // Wait 500ms
+  setSpeed(1000);                 // Request full speed
+  digitalWrite(DRIVE_PIN, HIGH);  // Reconnect ESC to power
+  delay(5000);                    // Wait 5 seconds
+  setSpeed(0);               // Request 0 speed
+  delay(8000);*/                    // Wait 8 seconds
   MsTimer2::stop();
-  MsTimer2::set(20, updatePid);
+  MsTimer2::set(1000/UPDATE_FREQUENCY, updatePid);
   while(Serial.available() && Serial.read());
   Serial.println(READY_CMD);
   while(readCmd() != READY_CMD);
@@ -224,14 +237,14 @@ void loop()
       Serial.println(ACK);
       for(int16_t i=0; i<SAMPLES_PER_PERIOD; ++i)
       {
-        signal[i] = amplitude*sin(2*M_PI*((float)i/SAMPLES_PER_PERIOD))+base;
+        signal[i] = amplitude*sin(2*M_PI*((float)i/SAMPLES_PER_PERIOD));//+base;
         Serial.println(signal[i]);
       }
       Serial.println(ACK);
       break;
     case BEGIN_CMD:
       Serial.println(ACK);
-      target = base;
+      target = signal[0];
       setSpeed(offset);
       delay(5000);
       MsTimer2::start();
@@ -269,6 +282,32 @@ void loop()
       Serial.println(ACK);
       for(uint16_t i=0; i<SAMPLES_PER_PERIOD*periods_measure; ++i)
         Serial.println(datapoints[i]);
+      Serial.println(ACK);
+      break;
+    case BEGIN_STABILIZE_CMD:
+      Serial.println(ACK);
+      while(!Serial.available());
+      target = ((int16_t) Serial.read()) << 8;
+      while(!Serial.available());
+      target |= (int16_t) Serial.read();
+      while(!Serial.available());
+      if(Serial.read() != '\n')
+      {
+        Serial.print("Invalid stabilize command");
+        break;
+      }
+      Serial.println(target);
+      Serial.println(ACK);
+      MsTimer2::start();
+      while(!Serial.available())
+      {
+        uint32_t t0 = micros();
+        while(micros()-t0 < 1000000UL/UPDATE_FREQUENCY);
+        Serial.println(analogRead(SENSOR_PIN));
+      }
+      MsTimer2::stop();
+      setSpeed(0);
+      Serial.read();
       Serial.println(ACK);
       break;
     default:
